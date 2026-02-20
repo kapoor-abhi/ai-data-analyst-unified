@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL Database (For LangGraph Memory)
+  postgres_db:
+    image: postgres:15-alpine
+    container_name: ai_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432" # <-- CHANGED THIS LINE: Map Mac's 5433 to Container's 5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  # 2. Redis (For Semantic Caching)
+  redis_cache:
+    image: redis:7-alpine
+    container_name: ai_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # 3. Your FastAPI Application
+  web_app:
+    build: .
+    container_name: ai_fastapi
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount your local sandbox folder so you can see the generated plots and csvs on your host machine
+      - ./sandbox:/code/sandbox 
+    environment:
+      # Notice how we point to the container names ('postgres_db' and 'redis_cache') instead of 'localhost'
+      - DATABASE_URL=postgresql://postgres:password@postgres_db:5432/postgres
+      - REDIS_URL=redis://redis_cache:6379
+    env_file:
+      - .env
+    depends_on:
+      - postgres_db
+      - redis_cache
+
+# Define volumes so your DB and Cache don't wipe out when you restart Docker
+volumes:
+  postgres_data:
+  redis_data:
