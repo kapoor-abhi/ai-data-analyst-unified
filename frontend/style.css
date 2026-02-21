@@ -1,0 +1,97 @@
+/* frontend/style.css */
+
+/* =========================================
+   1. Custom Scrollbar Styling
+   ========================================= */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: #cbd5e1; /* Tailwind slate-300 */
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8; /* Tailwind slate-400 */
+}
+
+/* =========================================
+   2. Markdown Content Styling (LLM Output)
+   ========================================= */
+/* The marked.js library will output raw HTML tags (p, pre, code, ul). 
+   We need to style them so they look good inside the chat bubbles. */
+
+.message {
+    line-height: 1.6;
+    word-wrap: break-word;
+}
+
+.message p {
+    margin-bottom: 0.75rem;
+}
+
+.message p:last-child {
+    margin-bottom: 0;
+}
+
+/* Bullet points and Numbered lists */
+.message ul {
+    list-style-type: disc;
+    padding-left: 1.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.message ol {
+    list-style-type: decimal;
+    padding-left: 1.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.message li {
+    margin-bottom: 0.25rem;
+}
+
+/* Inline code formatting (e.g., `df.head()`) */
+.message code {
+    background-color: rgba(0, 0, 0, 0.05);
+    padding: 0.1rem 0.3rem;
+    border-radius: 0.25rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.85em;
+    color: #b91c1c; /* Tailwind red-700 */
+}
+
+/* Block code formatting (e.g., ```python ... ```) */
+.message pre {
+    background-color: #1e293b; /* Tailwind slate-800 */
+    color: #f8fafc; /* Tailwind slate-50 */
+    padding: 1rem;
+    border-radius: 0.5rem;
+    overflow-x: auto;
+    margin-top: 0.5rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.85em;
+    border: 1px solid #334155; /* Tailwind slate-700 */
+}
+
+/* Reset code styles inside a pre block so it doesn't clash with inline code */
+.message pre code {
+    background-color: transparent;
+    color: inherit;
+    padding: 0;
+    border-radius: 0;
+}
+
+/* Bold text */
+.message strong {
+    font-weight: 600;
+    color: #111827; /* Tailwind gray-900 */
+}
+
+/* Make sure AI messages have appropriate text colors for code */
+.ai-msg pre {
+    box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.06);
+}

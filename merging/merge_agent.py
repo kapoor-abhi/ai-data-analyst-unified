@@ -1,18 +1,31 @@
+# merge_agent.py
+import os
 import re
+import json
 import pandas as pd
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
+from langgraph.types import interrupt # Added interrupt import explicitly
 from core.state import MasterState
+
+# Import our new secure Docker sandbox
+from core.sandbox import DockerREPL
+
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 SANDBOX_DIR = "sandbox"
 
-llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+# OPTIMIZATION: Fast model for analysis and simple reasoning
+fast_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+# OPTIMIZATION: Heavy 70B model strictly for complex Python pandas code generation
+coder_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+
+# SECURITY FIX: Initialize the Docker Sandbox
+repl_sandbox = DockerREPL(sandbox_dir="sandbox", image_name="python-data-sandbox:latest")
 
 def get_dataframe_schema(working_files: dict) -> str:
     schema_info = ""
@@ -30,7 +43,6 @@ def analyze_merge_node(state: MasterState):
     working_files = state.get('working_files', {})
     
     if len(working_files) < 2:
-        # FIX: Reset transient state variables just in case
         return {"suggestion": "Only one file provided. No merge needed.", "error": "Not enough files", "iteration_count": 0}
 
     schema = get_dataframe_schema(working_files)
@@ -47,44 +59,70 @@ def analyze_merge_node(state: MasterState):
         ("user", "Schemas:\n{schema}")
     ])
 
-    chain = prompt | llm
+    chain = prompt | fast_llm
     response = chain.invoke({"schema": schema})
     
-    # FIX: Initialize iteration count for the downstream retry loop
     return {"suggestion": response.content, "error": None, "iteration_count": 0}
 
-def human_strategy_node(state: MasterState):
-    # This node acts as an anchor for the LangGraph interrupt. 
-    # The frontend will inject the 'user_feedback' here.
-    if not state.get('user_feedback'):
-        return {"user_feedback": state.get('suggestion')}
-    return {"error": None}
+from langchain_core.runnables.config import var_child_runnable_config, RunnableConfig
+
+# Notice we added `config: RunnableConfig` inside the parentheses here!
+async def human_strategy_node(state: MasterState, config: RunnableConfig):
+    # Manually patch the broken context
+    var_child_runnable_config.set(config)
+    
+    if state.get("error") and state.get("iteration_count", 0) >= 2:
+        msg = f"Code generation failed multiple times with error: {state.get('error')}. Please provide a simpler merge instruction or type 'skip' to bypass."
+    else:
+        msg = state.get('suggestion')
+        
+    feedback = interrupt(msg)
+    
+    if feedback and str(feedback).strip().lower() == 'skip':
+        return {"user_feedback": "skip", "error": None, "iteration_count": 0}
+        
+    return {"user_feedback": feedback, "error": None, "iteration_count": 0}
 
 def generate_merge_code_node(state: MasterState):
-    schema = get_dataframe_schema(state.get('working_files', {}))
-    instruction = state.get('user_feedback', state.get('suggestion'))
+    if str(state.get('user_feedback', '')).strip().lower() == 'skip':
+        return {"python_code": ""}
+        
+    working_files = state.get('working_files', {})
+    schema = get_dataframe_schema(working_files)
+    
+    raw_instruction = state.get('user_feedback', state.get('suggestion'))
     error_context = f"\n\nPrevious Error to Fix: {state.get('error')}" if state.get("error") else ""
+
+    # NEW: Intercept system commands so they aren't treated as Pandas filters
+    if str(raw_instruction).strip().lower() in ['approve', 'yes', 'ok', '']:
+        instruction = f"Proceed with your suggested strategy: {state.get('suggestion')}"
+    else:
+        instruction = raw_instruction
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a Python Pandas Expert.
         
-        CRITICAL CONTEXT:
-        1. You are running inside a function where a dictionary named `dfs` IS ALREADY DEFINED.
-        2. `dfs` keys are filename strings (e.g. 'file1.csv').
+        CRITICAL EXECUTION CONTEXT: 
+        I will provide a dictionary `working_files` mapping filenames to their temporary pickle file paths.
         
-        Task: 
-        Generate Python code to merge dataframes from `dfs` into a single variable `merged_df`.
+        YOUR SCRIPT MUST EXACTLY DO THIS:
+        1. Import pandas.
+        2. Define the `working_files` dictionary exactly as provided.
+        3. Load the dataframes using `pd.read_pickle(path)`.
+        4. Merge them according to the user instruction.
+        5. Save the final merged dataframe EXACTLY to 'sandbox/merged_dataset.pkl' using `.to_pickle('sandbox/merged_dataset.pkl')`.
         
         Rules:
         1. Return ONLY valid Python code inside Markdown blocks (```python ... ```).
         2. Use `pd.merge()`.
-        3. Assign the result to EXACTLY `merged_df`.
+        3. CRITICAL: Default to `how='outer'` to prevent accidental data loss, unless specifically told otherwise.
         """),
-        ("user", "Schemas:\n{schema}\n\nUser Instruction: {instruction}\n{error_context}")
+        ("user", "Working Files Paths:\n{files}\n\nSchemas:\n{schema}\n\nInstruction: {instruction}\n{error_context}")
     ])
 
-    chain = prompt | llm
+    chain = prompt | coder_llm
     response = chain.invoke({
+        "files": json.dumps(working_files, indent=2),
         "schema": schema,
         "instruction": instruction,
         "error_context": error_context
@@ -92,46 +130,45 @@ def generate_merge_code_node(state: MasterState):
 
     raw_content = response.content
     match = re.search(r"```python(.*?)```", raw_content, re.DOTALL)
-    code = match.group(1).strip() if match else raw_content.strip()
-    
-    return {"python_code": code}
+    return {"python_code": match.group(1).strip() if match else raw_content.strip()}
 
 def execute_merge_node(state: MasterState):
     code = state.get('python_code', '')
-    working_files = state.get('working_files', {})
     
-    # 1. Load dataframes from disk into memory
-    dfs = {name: pd.read_pickle(path) for name, path in working_files.items()}
-    local_scope = {"dfs": dfs, "pd": pd}
+    if not code:
+        return {"error": None, "iteration_count": 0}
     
-    try:
-        # 2. Execute LLM code
-        exec(code, {}, local_scope)
-        
-        result_df = local_scope.get("merged_df")
-        if result_df is None:
-            raise ValueError("Code ran, but 'merged_df' variable was not created.")
-            
-        # 3. Save the merged dataframe as a new file, update registry
-        merged_path = "sandbox/merged_dataset.pkl"
-        result_df.to_pickle(merged_path)
-        
-        # FIX: Explicitly clear errors and reset iteration counters on success
-        return {
-            "working_files": {"merged_dataset.pkl": merged_path}, 
-            "error": None,
-            "iteration_count": 0
-        }
-    except Exception as e:
-        # FIX: Increment the iteration counter specifically when code execution fails
+    result = repl_sandbox.run(code)
+    
+    if result["error"]:
         current_iter = state.get("iteration_count", 0) + 1
-        return {"error": str(e), "iteration_count": current_iter}
+        return {"error": result["error"], "iteration_count": current_iter}
+        
+    merged_path = "sandbox/merged_dataset.pkl"
+    
+    # NEW: Verify the merge didn't decimate the dataset
+    try:
+        df = pd.read_pickle(merged_path)
+        if len(df) == 0:
+            current_iter = state.get("iteration_count", 0) + 1
+            return {
+                "error": "CRITICAL AUDIT FAILURE: The merge resulted in 0 rows. Please check your join keys or use how='outer'.", 
+                "iteration_count": current_iter
+            }
+    except Exception as e:
+        current_iter = state.get("iteration_count", 0) + 1
+        return {"error": f"Failed to load merged dataset for audit: {e}", "iteration_count": current_iter}
+        
+    return {
+        "working_files": {"merged_dataset.pkl": merged_path}, 
+        "error": None,
+        "iteration_count": 0
+    }
 
 def route_merge_retry(state: MasterState):
     if state.get("error"):
-        # FIX: Implement a hard limit to prevent infinite loops (stops after 2 retries)
         if state.get("iteration_count", 0) >= 2:
-            return "success" 
+            return "human_strategy" 
         return "retry"
     return "success"
 
@@ -151,7 +188,7 @@ def build_merge_graph():
     workflow.add_conditional_edges(
         "execute",
         route_merge_retry,
-        {"retry": "generate", "success": END}
+        {"retry": "generate", "human_strategy": "human_strategy", "success": END}
     )
     
     return workflow

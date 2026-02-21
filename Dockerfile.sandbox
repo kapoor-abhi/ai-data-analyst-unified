@@ -1,0 +1,32 @@
+# Use a lightweight Python base image
+FROM python:3.10-slim
+
+# Set environment variables
+# PYTHONDONTWRITEBYTECODE: Prevents Python from writing .pyc files to disk
+# PYTHONUNBUFFERED: Ensures stdout/stderr are flushed immediately so we capture logs in real-time
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Install system dependencies (if needed for compiling certain pandas/numpy C-extensions)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install the necessary data science libraries
+# --no-cache-dir keeps the Docker image size small
+RUN pip install --no-cache-dir \
+    pandas \
+    numpy \
+    matplotlib \
+    seaborn \
+    pyarrow \
+    fastparquet
+
+# Create the sandbox directory where the host volume will be mounted
+RUN mkdir -p /app/sandbox
+
+# Default command (this gets overridden by our Python Docker SDK during execution)
+CMD ["python", "--version"]

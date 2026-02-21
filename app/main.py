@@ -3,18 +3,27 @@ import os
 import uuid
 import shutil
 import logging
+import hashlib
+import pandas as pd
+import numpy as np 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+import json
+import math
+from fastapi.responses import Response
+
 # Enterprise ML Imports
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langfuse.langchain import CallbackHandler
 from langchain_core.globals import set_llm_cache
-from langchain_community.cache import RedisSemanticCache
-from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+from langchain_community.cache import RedisCache
+from redis import Redis
+from langgraph.types import Command
 
 # Import our Super-Graph
 from core.super_agent import build_super_graph
@@ -27,24 +36,29 @@ DB_URI = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/po
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
 # 1. Initialize Langfuse Observability
-langfuse_handler = CallbackHandler(
-    public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
-    secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
-    host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
-)
+langfuse_handler = CallbackHandler()
 
-# 2. Initialize Redis Semantic Cache (Open Source Embeddings)
+# 2. CACHE FIX: Initialize Exact-Match Redis Cache (Not Semantic!)
 try:
-    set_llm_cache(RedisSemanticCache(
-        redis_url=REDIS_URL,
-        embedding=FastEmbedEmbeddings()
-    ))
-    logger.info("Redis Semantic Cache activated.")
+    redis_client = Redis.from_url(REDIS_URL)
+    set_llm_cache(RedisCache(redis_=redis_client))
+    logger.info("Exact-Match Redis Cache activated.")
 except Exception as e:
     logger.warning(f"Could not connect to Redis: {e}. Running without cache.")
 
 SANDBOX_DIR = "sandbox"
 os.makedirs(SANDBOX_DIR, exist_ok=True)
+
+# Simple local registry for file hashes to prevent redundant processing
+HASH_REGISTRY = {}
+
+def get_file_hash(filepath: str) -> str:
+    """Generates a SHA-256 hash of a file to check if we've processed it before."""
+    hasher = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        while chunk := f.read(8192):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -62,40 +76,130 @@ async def lifespan(app: FastAPI):
         yield
 
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 super_graph = build_super_graph()
 
+def extract_deepest_state_and_interrupt(state_snapshot):
+    """Recursively extracts the interrupt message and merges state from nested sub-graphs."""
+    msg = ""
+    values = getattr(state_snapshot, 'values', {})
+    
+    if hasattr(state_snapshot, 'tasks') and state_snapshot.tasks:
+        for task in state_snapshot.tasks:
+            
+            # 1. DIVE DEEP FIRST: Always recurse into sub-graphs to get the freshest data
+            if hasattr(task, 'state') and task.state:
+                sub_msg, sub_values = extract_deepest_state_and_interrupt(task.state)
+                # Merge states: sub-graph data (like cleaning_plan) updates the parent data
+                values = {**values, **sub_values}
+                if sub_msg:
+                    msg = sub_msg
+            
+            # 2. CHECK INTERRUPTS: Grab the interrupt if we haven't found one deeper down
+            if not msg and hasattr(task, 'interrupts') and task.interrupts:
+                msg = str(task.interrupts[0].value)
+                
+    return msg, values
+
 @app.post("/upload")
-async def upload_file(thread_id: str = Form(...), files: list[UploadFile] = File(...)):
-    """Uploads files and triggers the Ingestion -> Merge -> Clean pipeline."""
+async def upload_file(
+    thread_id: str = Form(...), 
+    user_input: str = Form(""), 
+    files: list[UploadFile] = File(...)
+):
+    """Uploads files, checks hashes, and triggers the ETL pipeline until the first interrupt."""
     try:
         file_paths = []
         for file in files:
-            file_id = str(uuid.uuid4())[:8]
-            file_name = f"{file_id}_{file.filename}"
-            full_path = os.path.join(SANDBOX_DIR, file_name)
+            temp_id = str(uuid.uuid4())[:8]
+            temp_name = f"temp_{temp_id}_{file.filename}"
+            full_path = os.path.join(SANDBOX_DIR, temp_name)
             
             with open(full_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
-            file_paths.append(full_path)
+                
+            file_hash = get_file_hash(full_path)
+            
+            if file_hash in HASH_REGISTRY:
+                logger.info(f"File {file.filename} already processed. Utilizing cache.")
+                os.remove(full_path) 
+                file_paths.append(HASH_REGISTRY[file_hash])
+            else:
+                final_path = os.path.join(SANDBOX_DIR, f"{temp_id}_{file.filename}")
+                os.rename(full_path, final_path)
+                HASH_REGISTRY[file_hash] = final_path
+                file_paths.append(final_path)
             
         async with app.state.pool.connection() as conn:
             checkpointer = AsyncPostgresSaver(conn)
             app_compiled = super_graph.compile(checkpointer=checkpointer)
             
-            config = {
-                "configurable": {"thread_id": thread_id},
-                "callbacks": [langfuse_handler] # Injects Observability
-            }
+            config = {"configurable": {"thread_id": thread_id}}
+            inputs = {"file_paths": file_paths, "messages": [], "user_input": user_input} 
             
-            inputs = {"file_paths": file_paths, "messages": []}
-            
-            # Run the graph. It will process ingestion/cleaning and pause.
             output = await app_compiled.ainvoke(inputs, config)
             
-            return {"status": "success", "message": "Files ingested and cleaned.", "working_files": output.get("working_files")}
+            # Fetch the state snapshot and explicitly ask LangGraph to include sub-graphs
+            state_snapshot = await app_compiled.aget_state(config, subgraphs=True)
+            
+            if state_snapshot.next:
+                # Use our new recursive function to pull the nested state and interrupt
+                msg, combined_values = extract_deepest_state_and_interrupt(state_snapshot)
+                return {
+                    "status": "paused", 
+                    "interrupt_msg": msg,
+                    "pending_state": combined_values
+                }
+            
+            return {"status": "success", "message": "Pipeline completed without interrupts.", "working_files": output.get("working_files")}
             
     except Exception as e:
-        logger.error(f"Upload error: {e}")
+        logger.error("Upload error encountered:", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    
+@app.post("/resume")
+async def resume_pipeline(
+    thread_id: str = Form(...), 
+    user_feedback: str = Form(None)
+):
+    """HITL ENDPOINT: Injects human feedback into the state and unpauses the graph."""
+    try:
+        async with app.state.pool.connection() as conn:
+            checkpointer = AsyncPostgresSaver(conn)
+            app_compiled = super_graph.compile(checkpointer=checkpointer)
+            config = {"configurable": {"thread_id": thread_id}}
+            
+            # Include subgraphs=True here to accurately verify if the nested graph is paused
+            state_snapshot = await app_compiled.aget_state(config, subgraphs=True)
+            if not state_snapshot.next:
+                raise HTTPException(status_code=400, detail="Graph is not currently paused.")
+                
+            output = await app_compiled.ainvoke(Command(resume=user_feedback), config)
+            
+            # Include subgraphs=True here to fetch the newly paused state
+            new_snapshot = await app_compiled.aget_state(config, subgraphs=True)
+            
+            if new_snapshot.next:
+                # Use our new recursive function
+                msg, combined_values = extract_deepest_state_and_interrupt(new_snapshot)
+                return {
+                    "status": "paused", 
+                    "interrupt_msg": msg,
+                    "pending_state": combined_values
+                }
+                
+            return {"status": "success", "message": "ETL Pipeline complete. Ready for Chat.", "working_files": output.get("working_files")}
+            
+    except Exception as e:
+        logger.error(f"Resume error: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/chat")
@@ -105,27 +209,15 @@ async def chat(message: str = Form(...), thread_id: str = Form(...)):
         async with app.state.pool.connection() as conn:
             checkpointer = AsyncPostgresSaver(conn)
             app_compiled = super_graph.compile(checkpointer=checkpointer)
-            
-            config = {
-                "configurable": {"thread_id": thread_id},
-                "callbacks": [langfuse_handler]
-            }
-            
+            config = {"configurable": {"thread_id": thread_id}}
             inputs = {"user_input": message}
             
-            # The graph will automatically start at 'chat' because working_files already exist in the PostgreSQL state
             output = await app_compiled.ainvoke(inputs, config)
-            
             last_msg = output["messages"][-1].content
-            
-            # Check if the visualization node saved a chart
             charts = output.get("charts_generated", [])
             latest_chart = charts[-1] if charts else None
 
-            return {
-                "response": last_msg, 
-                "plot_url": f"/{latest_chart}" if latest_chart else None
-            }
+            return {"response": last_msg, "plot_url": f"/{latest_chart}" if latest_chart else None}
             
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)
@@ -137,3 +229,62 @@ async def get_plot(plot_name: str):
     if os.path.exists(full_path):
         return FileResponse(full_path)
     return JSONResponse(status_code=404, content={"error": "Plot not found"})
+
+@app.get("/download")
+async def download_cleaned_data(filename: str = "merged_dataset.pkl"):
+    file_path = os.path.join(SANDBOX_DIR, filename)
+    if not os.path.exists(file_path):
+        pkl_files = [f for f in os.listdir(SANDBOX_DIR) if f.endswith('.pkl')]
+        if not pkl_files:
+            return JSONResponse(status_code=404, content={"error": "No cleaned dataset found in sandbox."})
+        file_path = os.path.join(SANDBOX_DIR, pkl_files[0])
+
+    try:
+        df = pd.read_pickle(file_path)
+        csv_filename = file_path.replace(".pkl", ".csv")
+        df.to_csv(csv_filename, index=False)
+        return FileResponse(path=csv_filename, filename="cleaned_data_output.csv", media_type="text/csv")
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Failed to generate CSV: {str(e)}"})
+
+@app.get("/statistics")
+async def get_data_statistics(filename: str = "merged_dataset.pkl"):
+    file_path = os.path.join(SANDBOX_DIR, filename)
+    if not os.path.exists(file_path):
+        pkl_files = [f for f in os.listdir(SANDBOX_DIR) if f.endswith('.pkl')]
+        if not pkl_files:
+            return JSONResponse(status_code=404, content={"error": "No data found in sandbox."})
+        file_path = os.path.join(SANDBOX_DIR, pkl_files[0])
+
+    try:
+        df = pd.read_pickle(file_path)
+        stats_df = df.describe(include='all')
+        stats_dict = stats_df.to_dict()
+        
+        column_info = {}
+        for col in df.columns:
+            column_info[col] = {
+                "dtype": str(df[col].dtype),
+                "missing_values": int(df[col].isna().sum()),
+                "unique_values": int(df[col].nunique())
+            }
+            if col in stats_dict:
+                column_info[col].update(stats_dict[col])
+
+        payload = {"total_rows": len(df), "total_columns": len(df.columns), "columns": column_info, "sample_data": df.head(10).to_dict(orient="records")}
+
+        def clean_value(obj):
+            if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)): return None
+            if pd.api.types.is_scalar(obj) and pd.isna(obj): return None
+            if isinstance(obj, (pd.Timestamp, pd.Series, pd.Index)): return str(obj)
+            return obj
+
+        def deep_clean(d):
+            if isinstance(d, dict): return {k: deep_clean(v) for k, v in d.items()}
+            elif isinstance(d, list): return [deep_clean(v) for v in d]
+            else: return clean_value(d)
+
+        return Response(content=json.dumps(deep_clean(payload)), media_type="application/json")
+    except Exception as e:
+        logger.error(f"Critical Stats Error: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
