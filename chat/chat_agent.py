@@ -1,11 +1,11 @@
-# chat_agent.py
+# chat/chat_agent.py
 import os
 import re
 import json
 import pandas as pd
 import duckdb
 from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from core.state import MasterState
@@ -48,33 +48,26 @@ def get_database_schema(working_files: dict) -> tuple[str, dict]:
     return schema_info, clean_dfs
 
 def intent_router_node(state: MasterState):
-    working_files = state.get('working_files', {})
-    schema_info, _ = get_database_schema(working_files)
     user_input = state.get('user_input', '')
     
-    # MEMORY FIX: Get the last 5 messages, excluding the current query we just appended
-    raw_msgs = state.get("messages", [])
-    recent_msgs = raw_msgs[:-1][-5:] if len(raw_msgs) > 0 else []
-    history_str = "\n".join([f"{m.type.capitalize()}: {m.content}" for m in recent_msgs]) if recent_msgs else "No prior conversation."
-    
+    # FIX: We NO LONGER pass the chat history to the 8B router. 
+    # It only needs to evaluate the current user_input to prevent hallucinating.
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an intelligent router for a Data AI.
-        Determine if the user's request requires calculating numbers/text (query) OR generating a chart/graph (visualize).
-        
-        Conversation Context (Last 5 Messages):
-        {history}
+        ("system", """You are an intelligent classification router for a Data AI.
+        Evaluate the user's latest request and determine if it requires calculating numbers/text (query) OR generating a chart/graph (visualize).
         
         Respond with EXACTLY ONE WORD:
-        - "query" (for questions like "What is the average price?", "Show top 5 sales", etc.)
-        - "visualize" (for questions like "Plot a bar chart", "Show the distribution", "Graph this", etc.)
+        - "query" (for questions like "What is the average price?", "Show top 5 sales", "Calculate revenue")
+        - "visualize" (for questions like "Plot a bar chart", "Show the distribution", "Graph this")
         """),
-        ("user", "Data Schema:\n{schema}\n\nUser Request: {request}")
+        ("user", "{request}")
     ])
     
-    response = (prompt | router_llm).invoke({"schema": schema_info, "history": history_str, "request": user_input})
+    response = (prompt | router_llm).invoke({"request": user_input})
     intent = response.content.lower().strip().replace("'", "").replace(".", "")
     
-    if "visualize" in intent or "plot" in intent or "chart" in intent:
+    # Fallback keyword logic to guarantee accuracy
+    if any(word in intent for word in ["visualize", "plot", "chart", "graph"]):
         intent = 'visualize'
     else:
         intent = 'query'
@@ -88,26 +81,23 @@ def intent_router_node(state: MasterState):
 def sql_query_node(state: MasterState):
     working_files = state.get('working_files', {})
     schema_info, clean_dfs = get_database_schema(working_files)
-    user_input = state.get('user_input', '')
-    messages = list(state.get("messages", []))
     
-    # MEMORY FIX
-    recent_msgs = messages[:-1][-5:] if len(messages) > 0 else []
-    history_str = "\n".join([f"{m.type.capitalize()}: {m.content}" for m in recent_msgs]) if recent_msgs else "No prior conversation."
+    raw_msgs = state.get("messages", [])
+    context_msgs = raw_msgs[-5:] if len(raw_msgs) > 0 else []
     
     sql_prompt = ChatPromptTemplate.from_messages([
         ("system", """You are an expert DuckDB SQL Developer.
         Write a SQL query to answer the user's question based on the provided tables.
         
-        Conversation Context (Last 5 Messages):
-        {history}
+        Schema:
+        {schema}
         
         Return ONLY valid SQL code inside ```sql ... ``` blocks. Do not add explanations.
         """),
-        ("user", "Schema:\n{schema}\n\nQuestion: {request}")
+        MessagesPlaceholder(variable_name="messages")
     ])
     
-    sql_response = (sql_prompt | coder_llm).invoke({"schema": schema_info, "history": history_str, "request": user_input})
+    sql_response = (sql_prompt | coder_llm).invoke({"schema": schema_info, "messages": context_msgs})
     
     raw_sql = sql_response.content
     match = re.search(r"```sql(.*?)```", raw_sql, re.DOTALL | re.IGNORECASE)
@@ -123,41 +113,33 @@ def sql_query_node(state: MasterState):
         conn.close()
     except Exception as e:
         error_msg = f"SQL Execution Failed: {str(e)}\nAttempted Query: {sql_query}"
-        messages.append(AIMessage(content=error_msg))
-        return {"messages": messages, "error": error_msg, "next_step": "end", "iteration_count": 0}
+        return {"messages": [AIMessage(content=error_msg)], "error": error_msg, "next_step": "end", "iteration_count": 0}
 
     summary_prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a helpful Data Analyst. Summarize the answer to the user's question using the raw SQL results below in a clean, human-readable way.
         
-        Conversation Context:
-        {history}
+        SQL Result:
+        {result}
         """),
-        ("user", "Question: {request}\nSQL Result:\n{result}")
+        MessagesPlaceholder(variable_name="messages")
     ])
     
-    summary_response = (summary_prompt | coder_llm).invoke({"history": history_str, "request": user_input, "result": query_result_str})
-    messages.append(AIMessage(content=summary_response.content))
+    summary_response = (summary_prompt | coder_llm).invoke({"result": query_result_str, "messages": context_msgs})
     
-    return {"messages": messages, "error": None, "iteration_count": 0}
+    return {"messages": [AIMessage(content=summary_response.content)], "error": None, "iteration_count": 0}
 
 def visualizer_node(state: MasterState):
     working_files = state.get('working_files', {})
     schema_info, _ = get_database_schema(working_files) 
     
-    user_input = state.get('user_input', '')
-    error_feedback = f"\n\nPrevious Error to Fix: {state.get('error')}" if state.get('error') else ""
-    raw_msgs = state.get("messages", [])
+    error_feedback = f"\n\nPREVIOUS EXECUTION ERROR TO FIX:\n{state.get('error')}" if state.get('error') else ""
     
-    # MEMORY FIX
-    recent_msgs = raw_msgs[:-1][-5:] if len(raw_msgs) > 0 else []
-    history_str = "\n".join([f"{m.type.capitalize()}: {m.content}" for m in recent_msgs]) if recent_msgs else "No prior conversation."
+    raw_msgs = state.get("messages", [])
+    context_msgs = raw_msgs[-5:] if len(raw_msgs) > 0 else []
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a Python Data Visualization Expert.
-        Write a Python script to create the requested chart using the provided Data Schemas.
-        
-        Conversation Context (Last 5 Messages):
-        {history}
+        Write a Python script to create the requested chart.
         
         CRITICAL EXECUTION CONTEXT: 
         I will provide a dictionary `working_files` mapping filenames to their temporary pickle paths.
@@ -172,17 +154,21 @@ def visualizer_node(state: MasterState):
         7. Print ONLY the file path using `print(f"SAVED_CHART:{{unique_name}}")`
         8. Clear the plot: `plt.close('all')`
         
-        RETURN ONLY VALID PYTHON CODE inside ```python ... ``` blocks.{error_feedback}
+        Data Schemas:
+        {schema}
+        
+        Working Files Paths:
+        {files}
+        {error_feedback}
         """),
-        ("user", "Working Files Paths:\n{files}\n\nData Schemas:\n{schema}\n\nRequest: {request}")
+        MessagesPlaceholder(variable_name="messages")
     ])
     
     response = (prompt | coder_llm).invoke({
         "files": json.dumps(working_files, indent=2),
         "schema": schema_info, 
-        "history": history_str,
-        "request": user_input,
-        "error_feedback": error_feedback 
+        "error_feedback": error_feedback,
+        "messages": context_msgs
     })
     
     raw_code = response.content
@@ -191,13 +177,10 @@ def visualizer_node(state: MasterState):
     
     result = repl_sandbox.run(code)
     
-    messages = list(state.get("messages", []))
-    
     if result["error"]:
         current_iter = state.get("iteration_count", 0) + 1
         if current_iter > 2:
-            messages.append(AIMessage(content=f"I failed to generate the chart after multiple attempts. The execution error was: {result['error']}"))
-            return {"error": result["error"], "iteration_count": current_iter, "messages": messages}
+            return {"error": result["error"], "iteration_count": current_iter, "messages": [AIMessage(content=f"I failed to generate the chart after multiple attempts. The execution error was: {result['error']}")]}
         
         return {"error": result["error"], "iteration_count": current_iter}
         
@@ -209,11 +192,9 @@ def visualizer_node(state: MasterState):
     if chart_match:
         chart_path = chart_match.group(1).strip()
         charts_generated.append(chart_path)
-        messages.append(AIMessage(content=f"I have generated the chart. You can view it here: {chart_path}"))
+        return {"messages": [AIMessage(content=f"I have generated the chart. You can view it here: {chart_path}")], "charts_generated": charts_generated, "error": None, "iteration_count": 0}
     else:
-        messages.append(AIMessage(content="The code executed successfully, but no chart was saved."))
-        
-    return {"messages": messages, "charts_generated": charts_generated, "error": None, "iteration_count": 0}
+        return {"messages": [AIMessage(content="The code executed successfully, but no chart was saved.")], "charts_generated": charts_generated, "error": None, "iteration_count": 0}
 
 def route_intent(state: MasterState):
     if state.get("next_step") == "visualize":

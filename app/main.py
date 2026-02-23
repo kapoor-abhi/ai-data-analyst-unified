@@ -277,30 +277,74 @@ async def download_cleaned_data(filename: str = "merged_dataset.pkl"):
         return JSONResponse(status_code=500, content={"error": f"Failed to generate CSV: {str(e)}"})
 
 @app.get("/statistics")
-async def get_data_statistics(filename: str = "merged_dataset.pkl"):
-    file_path = os.path.join(SANDBOX_DIR, filename)
-    if not os.path.exists(file_path):
-        pkl_files = [f for f in os.listdir(SANDBOX_DIR) if f.endswith('.pkl')]
-        if not pkl_files:
-            return JSONResponse(status_code=404, content={"error": "No data found in sandbox."})
-        file_path = os.path.join(SANDBOX_DIR, pkl_files[0])
+async def get_data_statistics(filename: str = None):
+    """Aggregates statistics for ALL active datasets in the sandbox."""
+    pkl_files = [f for f in os.listdir(SANDBOX_DIR) if f.endswith('.pkl')]
+    
+    if not pkl_files:
+        return JSONResponse(status_code=404, content={"error": "No data found in sandbox."})
+        
+    # CRITICAL: If the merging agent has unified the data, prioritize that single file!
+    if "merged_dataset.pkl" in pkl_files:
+        pkl_files = ["merged_dataset.pkl"]
+
+    total_rows = 0
+    total_cols = 0
+    all_columns_info = {}
+    raw_sample_data = []
 
     try:
-        df = pd.read_pickle(file_path)
-        stats_df = df.describe(include='all')
-        stats_dict = stats_df.to_dict()
-        
-        column_info = {}
-        for col in df.columns:
-            column_info[col] = {
-                "dtype": str(df[col].dtype),
-                "missing_values": int(df[col].isna().sum()),
-                "unique_values": int(df[col].nunique())
-            }
-            if col in stats_dict:
-                column_info[col].update(stats_dict[col])
+        for file in pkl_files:
+            file_path = os.path.join(SANDBOX_DIR, file)
+            df = pd.read_pickle(file_path)
+            
+            total_rows += len(df)
+            total_cols += len(df.columns)
+            
+            stats_df = df.describe(include='all')
+            stats_dict = stats_df.to_dict()
+            
+            # 1. Prefix columns with filename if there are multiple files
+            is_multi_file = len(pkl_files) > 1
+            
+            # 2. Extract sample rows and append the filename to the keys
+            head_records = df.head(5).to_dict(orient="records")
+            for record in head_records:
+                if is_multi_file:
+                    raw_sample_data.append({f"[{file}] {k}": v for k, v in record.items()})
+                else:
+                    raw_sample_data.append(record)
 
-        payload = {"total_rows": len(df), "total_columns": len(df.columns), "columns": column_info, "sample_data": df.head(10).to_dict(orient="records")}
+            # 3. Aggregate column profiling stats
+            for col in df.columns:
+                display_col = f"[{file}] {col}" if is_multi_file else col
+                
+                all_columns_info[display_col] = {
+                    "dtype": str(df[col].dtype),
+                    "missing_values": int(df[col].isna().sum()),
+                    "unique_values": int(df[col].nunique())
+                }
+                if col in stats_dict:
+                    all_columns_info[display_col].update(stats_dict[col])
+
+        # 4. Pad the sample data with nulls so the frontend table doesn't break when columns mismatch
+        final_sample_data = []
+        if len(pkl_files) > 1 and raw_sample_data:
+            all_keys = list(all_columns_info.keys())
+            for record in raw_sample_data:
+                padded_record = {}
+                for k in all_keys:
+                    padded_record[k] = record.get(k, None)
+                final_sample_data.append(padded_record)
+        else:
+            final_sample_data = raw_sample_data
+
+        payload = {
+            "total_rows": total_rows, 
+            "total_columns": total_cols, 
+            "columns": all_columns_info, 
+            "sample_data": final_sample_data[:15] # Send top 15 rows total
+        }
 
         def clean_value(obj):
             if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)): return None
