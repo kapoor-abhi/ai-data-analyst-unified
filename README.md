@@ -10,7 +10,7 @@ The architecture emphasizes execution security, observability, and robust state 
 
 The system relies on a multi-layered architecture orchestrating specialized AI agents, secure execution environments, and stateful memory check-pointing.
 
-High-Level Architecture Diagram
+## High-Level Architecture Diagram
 <p align="center">
   <img src="screenshots/architecture.png" width="900"/>
 </p>
@@ -78,13 +78,13 @@ The system is heavily optimized for speed, utilizing Groq's LPU inference engine
 * **Databases**: PostgreSQL (Graph State), Redis (LLM Caching)
 * **Observability**: Langfuse
 
-Langgraph Graph
+## Langgraph Graph
 <p align="center">
   <img src="screenshots/langgraph_graph.png" width="400"/>
 </p>
 
 
-Frontend Preview
+## Frontend Preview
 <p align="center">
   <img src="screenshots/frontend" width="400"/>
 </p>
