@@ -80,5 +80,11 @@ The system is heavily optimized for speed, utilizing Groq's LPU inference engine
 
 Langgraph Graph
 <p align="center">
-  <img src="screenshots/langgraph_graph.png" width="200"/>
+  <img src="screenshots/langgraph_graph.png" width="400"/>
+</p>
+
+
+Frontend Preview
+<p align="center">
+  <img src="screenshots/frontend" width="400"/>
 </p>
