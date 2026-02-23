@@ -86,5 +86,5 @@ The system is heavily optimized for speed, utilizing Groq's LPU inference engine
 
 ## Frontend Preview
 <p align="center">
-  <img src="screenshots/frontend" width="400"/>
+  <img src="screenshots/frontend.png" width="400"/>
 </p>
