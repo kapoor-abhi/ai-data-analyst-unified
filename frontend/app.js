@@ -1,7 +1,7 @@
 // frontend/app.js
 const API_BASE_URL = 'http://localhost:8000';
 
-// 1. SESSION STORAGE FIX: Remember thread ID and logs across page reloads
+// 1. SESSION STORAGE: Remember thread ID and logs across page reloads
 let currentThreadId = sessionStorage.getItem('ai_thread_id');
 if (!currentThreadId) {
     currentThreadId = crypto.randomUUID();
@@ -15,6 +15,7 @@ const AppState = {
     hasShownCleaningPlan: false // Tracks if we've shown the JSON plan for this cycle
 };
 
+// DOM Elements
 const chatHistory = document.getElementById('chat-history');
 const uploadForm = document.getElementById('upload-form');
 const chatForm = document.getElementById('chat-form');
@@ -34,6 +35,11 @@ const statsColumns = document.getElementById('stats-columns');
 const previewThead = document.getElementById('preview-thead');
 const previewTbody = document.getElementById('preview-tbody');
 const previewContainer = document.getElementById('data-preview-container');
+
+// NEW DOM Elements for EDA Feature
+const tabEDA = document.getElementById('tab-eda');
+const edaContainer = document.getElementById('eda-container');
+const edaFrame = document.getElementById('eda-frame');
 
 marked.setOptions({ breaks: true, gfm: true });
 
@@ -57,14 +63,40 @@ function setLoading(isLoading, statusText = 'Processing...') {
     if (isLoading) {
         loadingIndicator.classList.remove('hidden');
         uploadForm.querySelector('button').disabled = true;
-        chatForm.querySelector('button').disabled = true;
+        if(chatForm) chatForm.querySelector('button').disabled = true;
     } else {
         loadingIndicator.classList.add('hidden');
         uploadForm.querySelector('button').disabled = false;
-        chatForm.querySelector('button').disabled = false;
+        if(chatForm) chatForm.querySelector('button').disabled = false;
     }
     pipelineStatus.textContent = `Status: ${isLoading ? statusText : 'Idle'}`;
 }
+
+// 2. LIVE MULTI-FILE PREVIEW LOGIC
+// Instantly display all selected files in the workspace before ingestion starts
+fileInput.addEventListener('change', () => {
+    if (fileInput.files.length > 0) {
+        let fileListHtml = `
+            <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200 w-full max-w-2xl mx-auto mt-10">
+                <h3 class="font-bold text-slate-700 mb-4 uppercase text-xs tracking-wider">Staged Files for Ingestion (${fileInput.files.length})</h3>
+                <ul class="space-y-2">`;
+                
+        for (let i = 0; i < fileInput.files.length; i++) {
+            const sizeKB = (fileInput.files[i].size / 1024).toFixed(1);
+            fileListHtml += `
+                <li class="flex justify-between items-center text-sm font-mono bg-slate-50 p-3 rounded border border-slate-100">
+                    <span class="text-blue-700 font-bold">📄 ${fileInput.files[i].name}</span>
+                    <span class="text-slate-400 text-xs">${sizeKB} KB</span>
+                </li>`;
+        }
+        
+        fileListHtml += `</ul>
+            <p class="text-[10px] text-slate-400 mt-4 text-center italic">Ready for ingestion pipeline...</p>
+            </div>`;
+        
+        workspaceEmpty.innerHTML = fileListHtml;
+    }
+});
 
 async function updateAuditAndStats(stepName) {
     try {
@@ -169,12 +201,14 @@ function setMode(newMode) {
     if (newMode === 'upload') {
         uploadForm.classList.remove('hidden');
         chatForm.classList.add('hidden');
+        if(tabEDA) tabEDA.classList.add('hidden'); // Keep EDA locked during upload/processing
     } else {
         uploadForm.classList.add('hidden');
         chatForm.classList.remove('hidden');
         workspaceEmpty.classList.add('hidden');
         statsContainer.classList.remove('hidden');
         downloadBtn.classList.remove('hidden');
+        if(tabEDA) tabEDA.classList.remove('hidden'); // UNLOCK EDA TAB
     }
 }
 
@@ -216,7 +250,7 @@ async function handleGraphResponse(data, stepName) {
         setMode('resume');
         
     } else if (data.status === 'success') {
-        addMessage('ai', "### ✅ Analysis Engine Ready\nETL Pipeline completed. Audit logs and data samples updated in the workspace. Ask me anything about the data.", true);
+        addMessage('ai', "### ✅ Analysis Engine Ready\nETL Pipeline completed. Audit logs, deep EDA report, and data samples updated in the workspace. Ask me anything about the data.", true);
         setMode('chat');
     }
 }
@@ -225,19 +259,17 @@ uploadForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (fileInput.files.length === 0) return;
     
-    // 2. FILE COMPARISON LOGIC: Check if uploading new files or reusing old files
+    // FILE COMPARISON LOGIC: Check if uploading new files or reusing old files
     const fileNames = Array.from(fileInput.files).map(f => f.name).join(',');
     const lastUploaded = sessionStorage.getItem('last_uploaded_files');
 
     if (fileNames !== lastUploaded) {
-        // New files detected! Generate a brand new thread to restart ingestion
         AppState.threadId = crypto.randomUUID();
         sessionStorage.setItem('ai_thread_id', AppState.threadId);
         sessionStorage.setItem('last_uploaded_files', fileNames);
         AppState.auditLog = [];
         sessionStorage.removeItem('ai_audit_log');
     } else {
-        // Same files! Retrieve the active thread to bypass ingestion
         AppState.threadId = sessionStorage.getItem('ai_thread_id');
     }
 
@@ -253,7 +285,6 @@ uploadForm.addEventListener('submit', async (e) => {
     try {
         const res = await fetch(`${API_BASE_URL}/upload`, { method: 'POST', body: formData });
         const data = await res.json();
-        // If the backend bypassed ingestion, it will return 'Session Restored' info
         if (res.ok) await handleGraphResponse(data, data.status === 'success' ? 'Session Restored' : 'Ingestion');
         else addMessage('error', data.error);
     } catch (e) { addMessage('error', 'Service Offline'); }
@@ -298,19 +329,43 @@ chatForm.addEventListener('submit', async (e) => {
     }
 });
 
+// 3. TAB SWITCHING LOGIC (Updated to include EDA)
 tabStats.addEventListener('click', () => {
     tabStats.className = 'text-blue-600 font-black border-b-2 border-blue-600 pb-1 text-xs uppercase tracking-wider';
     tabCharts.className = 'text-gray-400 font-black pb-1 text-xs uppercase tracking-wider hover:text-gray-600 transition';
+    if(tabEDA) tabEDA.className = 'text-gray-400 font-black pb-1 text-xs uppercase tracking-wider hover:text-gray-600 transition';
+    
     statsContainer.classList.remove('hidden');
     chartContainer.classList.add('hidden');
+    if(edaContainer) edaContainer.classList.add('hidden');
 });
 
 tabCharts.addEventListener('click', () => {
     tabCharts.className = 'text-blue-600 font-black border-b-2 border-blue-600 pb-1 text-xs uppercase tracking-wider';
     tabStats.className = 'text-gray-400 font-black pb-1 text-xs uppercase tracking-wider hover:text-gray-600 transition';
+    if(tabEDA) tabEDA.className = 'text-gray-400 font-black pb-1 text-xs uppercase tracking-wider hover:text-gray-600 transition';
+    
     chartContainer.classList.remove('hidden');
     statsContainer.classList.add('hidden');
+    if(edaContainer) edaContainer.classList.add('hidden');
 });
+
+if (tabEDA) {
+    tabEDA.addEventListener('click', () => {
+        tabEDA.className = 'text-blue-600 font-black border-b-2 border-blue-600 pb-1 text-xs uppercase tracking-wider';
+        tabStats.className = 'text-gray-400 font-black pb-1 text-xs uppercase tracking-wider hover:text-gray-600 transition';
+        tabCharts.className = 'text-gray-400 font-black pb-1 text-xs uppercase tracking-wider hover:text-gray-600 transition';
+        
+        edaContainer.classList.remove('hidden');
+        statsContainer.classList.add('hidden');
+        chartContainer.classList.add('hidden');
+
+        // Fetch the report from the backend if it hasn't been loaded yet
+        if (!edaFrame.src || edaFrame.src === '') {
+            edaFrame.src = `${API_BASE_URL}/generate-eda`;
+        }
+    });
+}
 
 downloadBtn.addEventListener('click', () => { window.location.href = `${API_BASE_URL}/download`; });
 

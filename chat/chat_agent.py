@@ -52,9 +52,17 @@ def intent_router_node(state: MasterState):
     schema_info, _ = get_database_schema(working_files)
     user_input = state.get('user_input', '')
     
+    # MEMORY FIX: Get the last 5 messages, excluding the current query we just appended
+    raw_msgs = state.get("messages", [])
+    recent_msgs = raw_msgs[:-1][-5:] if len(raw_msgs) > 0 else []
+    history_str = "\n".join([f"{m.type.capitalize()}: {m.content}" for m in recent_msgs]) if recent_msgs else "No prior conversation."
+    
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are an intelligent router for a Data AI.
         Determine if the user's request requires calculating numbers/text (query) OR generating a chart/graph (visualize).
+        
+        Conversation Context (Last 5 Messages):
+        {history}
         
         Respond with EXACTLY ONE WORD:
         - "query" (for questions like "What is the average price?", "Show top 5 sales", etc.)
@@ -63,7 +71,7 @@ def intent_router_node(state: MasterState):
         ("user", "Data Schema:\n{schema}\n\nUser Request: {request}")
     ])
     
-    response = (prompt | router_llm).invoke({"schema": schema_info, "request": user_input})
+    response = (prompt | router_llm).invoke({"schema": schema_info, "history": history_str, "request": user_input})
     intent = response.content.lower().strip().replace("'", "").replace(".", "")
     
     if "visualize" in intent or "plot" in intent or "chart" in intent:
@@ -83,15 +91,23 @@ def sql_query_node(state: MasterState):
     user_input = state.get('user_input', '')
     messages = list(state.get("messages", []))
     
+    # MEMORY FIX
+    recent_msgs = messages[:-1][-5:] if len(messages) > 0 else []
+    history_str = "\n".join([f"{m.type.capitalize()}: {m.content}" for m in recent_msgs]) if recent_msgs else "No prior conversation."
+    
     sql_prompt = ChatPromptTemplate.from_messages([
         ("system", """You are an expert DuckDB SQL Developer.
         Write a SQL query to answer the user's question based on the provided tables.
+        
+        Conversation Context (Last 5 Messages):
+        {history}
+        
         Return ONLY valid SQL code inside ```sql ... ``` blocks. Do not add explanations.
         """),
         ("user", "Schema:\n{schema}\n\nQuestion: {request}")
     ])
     
-    sql_response = (sql_prompt | coder_llm).invoke({"schema": schema_info, "request": user_input})
+    sql_response = (sql_prompt | coder_llm).invoke({"schema": schema_info, "history": history_str, "request": user_input})
     
     raw_sql = sql_response.content
     match = re.search(r"```sql(.*?)```", raw_sql, re.DOTALL | re.IGNORECASE)
@@ -111,27 +127,37 @@ def sql_query_node(state: MasterState):
         return {"messages": messages, "error": error_msg, "next_step": "end", "iteration_count": 0}
 
     summary_prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful Data Analyst. Summarize the answer to the user's question using the raw SQL results below in a clean, human-readable way."),
+        ("system", """You are a helpful Data Analyst. Summarize the answer to the user's question using the raw SQL results below in a clean, human-readable way.
+        
+        Conversation Context:
+        {history}
+        """),
         ("user", "Question: {request}\nSQL Result:\n{result}")
     ])
     
-    summary_response = (summary_prompt | coder_llm).invoke({"request": user_input, "result": query_result_str})
+    summary_response = (summary_prompt | coder_llm).invoke({"history": history_str, "request": user_input, "result": query_result_str})
     messages.append(AIMessage(content=summary_response.content))
     
     return {"messages": messages, "error": None, "iteration_count": 0}
 
 def visualizer_node(state: MasterState):
     working_files = state.get('working_files', {})
-    # CHANGED: Added schema generation so the LLM knows what columns actually exist
     schema_info, _ = get_database_schema(working_files) 
     
     user_input = state.get('user_input', '')
     error_feedback = f"\n\nPrevious Error to Fix: {state.get('error')}" if state.get('error') else ""
+    raw_msgs = state.get("messages", [])
     
-    # CHANGED: Fixed the UUID import logic and injected Data Schema into the prompt
+    # MEMORY FIX
+    recent_msgs = raw_msgs[:-1][-5:] if len(raw_msgs) > 0 else []
+    history_str = "\n".join([f"{m.type.capitalize()}: {m.content}" for m in recent_msgs]) if recent_msgs else "No prior conversation."
+    
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a Python Data Visualization Expert.
         Write a Python script to create the requested chart using the provided Data Schemas.
+        
+        Conversation Context (Last 5 Messages):
+        {history}
         
         CRITICAL EXECUTION CONTEXT: 
         I will provide a dictionary `working_files` mapping filenames to their temporary pickle paths.
@@ -153,7 +179,8 @@ def visualizer_node(state: MasterState):
     
     response = (prompt | coder_llm).invoke({
         "files": json.dumps(working_files, indent=2),
-        "schema": schema_info, # Passes the schema!
+        "schema": schema_info, 
+        "history": history_str,
         "request": user_input,
         "error_feedback": error_feedback 
     })

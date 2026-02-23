@@ -134,6 +134,7 @@ def strategist_node(state: MasterState):
         7. CRITICAL: For categorical columns that have nulls, you MUST include a 'fill_missing_unknown' action. Set has_filled_unknowns to true.
         8. CRITICAL: You MUST include a 'deduplicate_records' action for the dataset. Set has_deduplicated to true.
         9. Return ONLY valid JSON matching the schema below.
+        10. CRITICAL: For ALL categorical/text columns, you MUST include a 'standardize_categories' action. This converts everything to lowercase and strips whitespace, completely preventing issues like 'CLAM' or 'Calm' or 'CAlm' being treated as different categories.
         
         SCHEMA:
         {schema}

@@ -230,7 +230,12 @@ async def chat(message: str = Form(...), thread_id: str = Form(...)):
                 "configurable": {"thread_id": thread_id},
                 "callbacks": [langfuse_handler]
             }
-            inputs = {"user_input": message}
+            
+            # ✅ THE MEMORY FIX: Append to LangGraph's message history AND pass user_input
+            inputs = {
+                "messages": [("user", message)], 
+                "user_input": message
+            }
             
             output = await app_compiled.ainvoke(inputs, config)
             last_msg = output["messages"][-1].content
@@ -238,6 +243,10 @@ async def chat(message: str = Form(...), thread_id: str = Form(...)):
             latest_chart = charts[-1] if charts else None
 
             return {"response": last_msg, "plot_url": f"/{latest_chart}" if latest_chart else None}
+            
+    except Exception as e:
+        logger.error(f"Chat error: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
             
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)
@@ -308,3 +317,38 @@ async def get_data_statistics(filename: str = "merged_dataset.pkl"):
     except Exception as e:
         logger.error(f"Critical Stats Error: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
+    
+
+from ydata_profiling import ProfileReport
+
+@app.get("/generate-eda")
+async def generate_eda_report():
+    """Generates a deep univariate/bivariate EDA report on the cleaned dataset."""
+    filename = "merged_dataset.pkl"
+    file_path = os.path.join(SANDBOX_DIR, filename)
+    report_path = os.path.join(SANDBOX_DIR, "eda_report.html")
+    
+    # If a previous report already exists, serve it instantly
+    if os.path.exists(report_path):
+        return FileResponse(report_path, media_type="text/html")
+        
+    # If no merged dataset exists yet, fallback to looking for any .pkl
+    if not os.path.exists(file_path):
+        pkl_files = [f for f in os.listdir(SANDBOX_DIR) if f.endswith('.pkl')]
+        if not pkl_files:
+            return JSONResponse(status_code=404, content={"error": "No cleaned data found to profile."})
+        file_path = os.path.join(SANDBOX_DIR, pkl_files[0])
+
+    try:
+        # Load the cleaned data
+        df = pd.read_pickle(file_path)
+        
+        # Generate the report (minimal=True speeds it up for large datasets)
+        profile = ProfileReport(df, title="Deep Data Profiling Report", minimal=False, explorative=True)
+        profile.to_file(report_path)
+        
+        return FileResponse(report_path, media_type="text/html")
+        
+    except Exception as e:
+        logger.error(f"EDA Generation Error: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"Failed to generate EDA: {str(e)}"})

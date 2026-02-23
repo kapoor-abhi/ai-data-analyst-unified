@@ -49,6 +49,7 @@
             <div class="flex gap-6">
                 <button id="tab-stats" class="text-blue-600 font-black border-b-2 border-blue-600 pb-1 text-xs uppercase tracking-wider">Audit & Stats</button>
                 <button id="tab-charts" class="text-gray-400 font-black pb-1 text-xs uppercase tracking-wider hover:text-gray-600 transition">Visualizations</button>
+                <button id="tab-eda" class="hidden text-gray-400 font-black pb-1 text-xs uppercase tracking-wider hover:text-gray-600 transition">EDA Report</button>
             </div>
             
             <div class="flex gap-2">
@@ -62,15 +63,14 @@
             
             <div id="workspace-empty" class="h-full flex flex-col items-center justify-center text-gray-400 space-y-4">
                 <div class="p-6 bg-white rounded-full shadow-inner">📄</div>
-                <p class="font-medium">No data processed yet. Ingestion will trigger workspace profiling.</p>
+                <p class="font-medium">No data processed yet. Select files to preview them here.</p>
             </div>
 
             <div id="stats-container" class="hidden space-y-6">
                 
                 <div id="audit-trail-container"></div>
 
-                
-                <div id="data-preview-container" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div id="data-preview-container" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hidden">
                     <div class="p-4 border-b bg-gray-50 flex justify-between items-center">
                         <h2 class="text-sm font-bold text-slate-700 uppercase tracking-tight">Live Data Preview (Top 10 Rows)</h2>
                         <span class="text-[10px] bg-slate-200 px-2 py-0.5 rounded text-slate-600 font-mono">Status: POST-PROCESS</span>
@@ -78,25 +78,32 @@
                     <div class="overflow-x-auto">
                         <table class="w-full text-[11px] text-left border-collapse">
                             <thead id="preview-thead" class="bg-slate-50 border-b text-slate-500 uppercase font-bold">
-                                </thead>
+                            </thead>
                             <tbody id="preview-tbody" class="divide-y divide-gray-100 font-mono">
-                                </tbody>
+                            </tbody>
                         </table>
                     </div>
                 </div>
 
                 <div id="stats-overview" class="grid grid-cols-2 gap-4">
-                    </div>
+                </div>
 
                 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
                     <h3 class="text-sm font-bold text-slate-700 uppercase tracking-tight mb-4">Deep Data Profiling</h3>
                     <div id="stats-columns" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        </div>
+                    </div>
                 </div>
             </div>
 
             <div id="chart-container" class="hidden grid grid-cols-1 xl:grid-cols-2 gap-6 pb-10">
+            </div>
+
+            <div id="eda-container" class="hidden h-full pb-10">
+                <div class="bg-white p-2 rounded-xl shadow-sm border border-gray-200 h-[750px] w-full">
+                    <iframe id="eda-frame" class="w-full h-full border-0 rounded-lg"></iframe>
                 </div>
+            </div>
+
         </div>
     </div>
 

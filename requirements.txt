@@ -19,3 +19,4 @@ psycopg_pool
 langfuse
 python-dotenv
 docker
+ydata-profiling
