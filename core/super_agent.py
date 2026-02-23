@@ -1,5 +1,4 @@
-# core/super_agent.py
-
+#super_agent.py
 from langgraph.graph import StateGraph, START, END
 from core.state import MasterState
 
@@ -8,100 +7,58 @@ from merging.merge_agent import build_merge_graph
 from preprocessing.clean_agent import build_cleaning_graph
 from chat.chat_agent import build_chat_graph
 
-
-# =====================================================
-# ROUTER
-# =====================================================
-
 def entry_router(state: MasterState):
-
     working_files = state.get("working_files", {})
     user_input = state.get("user_input", "")
-
-    # Chat if data already prepared
+    
+    # 1. If we have a user question/input and data is already cleaned, jump to chat
     if user_input and working_files and state.get("deep_profile_report"):
         return "chat"
-
-    # New upload
+    
+    # 2. New Upload -> Start the ETL Pipeline
     if state.get("file_paths") and not working_files:
         return "ingestion"
-
-    # Data exists but not cleaned
+    
+    # 3. Data exists but not cleaned -> Resume the ETL
     if working_files and not state.get("deep_profile_report"):
-
         if len(working_files) > 1:
             return "merging"
-
         return "cleaning"
-
+        
     return "chat"
 
-
-# =====================================================
-# POST INGEST ROUTER
-# =====================================================
-
 def route_after_ingestion(state: MasterState):
-
-    if state.get("error"):
-        return END
-
+    if state.get("error"): return END
     working_files = state.get("working_files", {})
-
-    if len(working_files) > 1:
-        return "merging"
-
+    if len(working_files) > 1: return "merging"
     return "cleaning"
 
-
-# =====================================================
-# BUILD GRAPH
-# =====================================================
-
 def build_super_graph():
-
     workflow = StateGraph(MasterState)
-
-    # Build and compile subgraphs (required in your version)
-    ingestion_graph = build_ingestion_graph().compile()
-    merge_graph = build_merge_graph().compile()
-    cleaning_graph = build_cleaning_graph().compile()
-    chat_graph = build_chat_graph().compile()
-
-    # Add compiled subgraphs
-    workflow.add_node("ingestion", ingestion_graph)
-    workflow.add_node("merging", merge_graph)
-    workflow.add_node("cleaning", cleaning_graph)
-    workflow.add_node("chat", chat_graph)
-
-    # Entry routing
-    workflow.add_conditional_edges(
-        START,
-        entry_router,
-        {
-            "ingestion": "ingestion",
-            "merging": "merging",
-            "cleaning": "cleaning",
-            "chat": "chat"
-        }
-    )
-
-    # After ingestion
-    workflow.add_conditional_edges(
-        "ingestion",
-        route_after_ingestion,
-        {
-            "merging": "merging",
-            "cleaning": "cleaning",
-            END: END
-        }
-    )
-
-    # Linear ETL
+    
+    # HITL FIX: We now explicitly tell LangGraph to pause execution right before the human nodes.
+    # The graph will yield control back to the FastAPI backend, waiting for the user to approve or modify the state.
+    workflow.add_node("ingestion", build_ingestion_graph().compile())
+    workflow.add_node("merging", build_merge_graph().compile())
+    workflow.add_node("cleaning", build_cleaning_graph().compile())
+    workflow.add_node("chat", build_chat_graph().compile())
+    
+    workflow.add_conditional_edges(START, entry_router, {
+        "ingestion": "ingestion",
+        "merging": "merging",
+        "cleaning": "cleaning",
+        "chat": "chat"
+    })
+    
+    workflow.add_conditional_edges("ingestion", route_after_ingestion, {
+        "merging": "merging",
+        "cleaning": "cleaning",
+        END: END
+    })
+    
     workflow.add_edge("merging", "cleaning")
-
-    workflow.add_edge("cleaning", END)
+    # HALT THE ETL PIPELINE HERE. Wait for the user to chat.
+    workflow.add_edge("cleaning", END) 
     workflow.add_edge("chat", END)
-
-    # IMPORTANT: Do NOT compile here
+    
     return workflow

@@ -1,10 +1,17 @@
 // frontend/app.js
 const API_BASE_URL = 'http://localhost:8000';
 
+// 1. SESSION STORAGE FIX: Remember thread ID and logs across page reloads
+let currentThreadId = sessionStorage.getItem('ai_thread_id');
+if (!currentThreadId) {
+    currentThreadId = crypto.randomUUID();
+    sessionStorage.setItem('ai_thread_id', currentThreadId);
+}
+
 const AppState = {
-    threadId: crypto.randomUUID(),
+    threadId: currentThreadId,
     mode: 'upload',
-    auditLog: [],
+    auditLog: JSON.parse(sessionStorage.getItem('ai_audit_log') || '[]'),
     hasShownCleaningPlan: false // Tracks if we've shown the JSON plan for this cycle
 };
 
@@ -70,6 +77,10 @@ async function updateAuditAndStats(stepName) {
                 cols: stats.total_columns,
                 timestamp: new Date().toLocaleTimeString()
             });
+            
+            // Save audit log to session storage so it survives refresh
+            sessionStorage.setItem('ai_audit_log', JSON.stringify(AppState.auditLog));
+            
             renderAuditTrail();
             renderDataPreview(stats.sample_data);
             renderStatsCards(stats);
@@ -175,40 +186,28 @@ async function handleGraphResponse(data, stepName) {
         const msg = data.interrupt_msg || "";
         let aiResponse = "";
 
-        // 1. Errors Phase: Use backend interrupt message if available, fallback to hardcoded text
         if (state.error && state.error !== null && state.error !== "None") {
             aiResponse = `### ⚠️ Process Interrupted\n**Execution Error:**\n\`\`\`text\n${state.error}\n\`\`\`\n**${msg || "Please review and type a correction or 'skip'."}**`;
-            
-        // 2. Post-Cleaning Review Phase
         } else if (msg.toLowerCase().includes("iteration executed successfully") || (state.cleaning_plan && AppState.hasShownCleaningPlan)) {
             aiResponse = `### ✨ Agent Paused\n${msg || "Iteration executed successfully. Review the updated statistics. Type 'approve' to finalize, or provide further cleaning instructions."}`;
             AppState.hasShownCleaningPlan = true;
-
-        // 3. Strategy Review Phase (First time seeing the generated JSON cleaning plan)
         } else if (state.cleaning_plan && !AppState.hasShownCleaningPlan) {
             try {
                 const plan = JSON.parse(state.cleaning_plan);
                 aiResponse = `### 🔧 Logic Discovery: Cleaning Plan\nI have profiled the dataset and propose the following cleaning strategy:\n\n`;
-                
                 plan.actions.forEach(a => {
                     const target = a.target_column ? `Column \`${a.target_column}\`` : `Dataset Level`;
                     aiResponse += `* **${target}**: ${a.code_instruction} _[${a.action_type}]_\n`;
                 });
-                
-                // Inject the dynamic message from the Python interrupt()
                 aiResponse += `\n**${msg || "Confirm this strategy by typing 'approve', or provide your own custom modifications."}**`;
                 AppState.hasShownCleaningPlan = true;
             } catch (e) {
                 aiResponse = `### 🔧 Logic Discovery: Cleaning Plan\nI have a proposed cleaning plan, but it could not be parsed. **${msg || "Please type your manual cleaning instructions to proceed."}**`;
                 AppState.hasShownCleaningPlan = true;
             }
-            
-        // 4. Merging Phase
         } else if (state.suggestion || msg.toLowerCase().includes("merge")) {
             const strategyMsg = state.suggestion || "Suggested merge based on schema analysis.";
             aiResponse = `### 🧬 Logic Discovery: Merging\n**Strategy:** ${strategyMsg}\n\n**${msg || "Approve this merge or suggest an alternative."}**`;
-            
-        // 5. Default / Ingestion Phase
         } else {
             aiResponse = `### 🔍 Data Process Paused\n**${msg || "The raw data has been loaded and initial checks are done. Does the preview look correct? Type 'approve' to continue."}**`;
         }
@@ -226,7 +225,22 @@ uploadForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (fileInput.files.length === 0) return;
     
-    // Reset the cleaning tracker for a fresh upload
+    // 2. FILE COMPARISON LOGIC: Check if uploading new files or reusing old files
+    const fileNames = Array.from(fileInput.files).map(f => f.name).join(',');
+    const lastUploaded = sessionStorage.getItem('last_uploaded_files');
+
+    if (fileNames !== lastUploaded) {
+        // New files detected! Generate a brand new thread to restart ingestion
+        AppState.threadId = crypto.randomUUID();
+        sessionStorage.setItem('ai_thread_id', AppState.threadId);
+        sessionStorage.setItem('last_uploaded_files', fileNames);
+        AppState.auditLog = [];
+        sessionStorage.removeItem('ai_audit_log');
+    } else {
+        // Same files! Retrieve the active thread to bypass ingestion
+        AppState.threadId = sessionStorage.getItem('ai_thread_id');
+    }
+
     AppState.hasShownCleaningPlan = false;
     
     const formData = new FormData();
@@ -239,7 +253,8 @@ uploadForm.addEventListener('submit', async (e) => {
     try {
         const res = await fetch(`${API_BASE_URL}/upload`, { method: 'POST', body: formData });
         const data = await res.json();
-        if (res.ok) await handleGraphResponse(data, 'Ingestion');
+        // If the backend bypassed ingestion, it will return 'Session Restored' info
+        if (res.ok) await handleGraphResponse(data, data.status === 'success' ? 'Session Restored' : 'Ingestion');
         else addMessage('error', data.error);
     } catch (e) { addMessage('error', 'Service Offline'); }
     finally { setLoading(false); }

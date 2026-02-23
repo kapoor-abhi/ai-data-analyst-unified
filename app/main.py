@@ -19,11 +19,14 @@ from fastapi.responses import Response
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langfuse.langchain import CallbackHandler
 from langchain_core.globals import set_llm_cache
 from langchain_community.cache import RedisCache
 from redis import Redis
 from langgraph.types import Command
+
+# Langfuse Observability Imports
+from langfuse import observe
+from langfuse.langchain import CallbackHandler
 
 # Import our Super-Graph
 from core.super_agent import build_super_graph
@@ -74,6 +77,9 @@ async def lifespan(app: FastAPI):
     async with AsyncConnectionPool(conninfo=DB_URI, max_size=20) as pool:
         app.state.pool = pool
         yield
+        
+    # Flush Langfuse telemetry on shutdown to prevent dropped traces
+    langfuse_handler.flush()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -142,7 +148,11 @@ async def upload_file(
             checkpointer = AsyncPostgresSaver(conn)
             app_compiled = super_graph.compile(checkpointer=checkpointer)
             
-            config = {"configurable": {"thread_id": thread_id}}
+            # ATTACH LANGFUSE CALLBACK TO CONFIG
+            config = {
+                "configurable": {"thread_id": thread_id},
+                "callbacks": [langfuse_handler]
+            }
             inputs = {"file_paths": file_paths, "messages": [], "user_input": user_input} 
             
             output = await app_compiled.ainvoke(inputs, config)
@@ -151,7 +161,7 @@ async def upload_file(
             state_snapshot = await app_compiled.aget_state(config, subgraphs=True)
             
             if state_snapshot.next:
-                # Use our new recursive function to pull the nested state and interrupt
+                # Use our recursive function to pull the nested state and interrupt
                 msg, combined_values = extract_deepest_state_and_interrupt(state_snapshot)
                 return {
                     "status": "paused", 
@@ -175,7 +185,12 @@ async def resume_pipeline(
         async with app.state.pool.connection() as conn:
             checkpointer = AsyncPostgresSaver(conn)
             app_compiled = super_graph.compile(checkpointer=checkpointer)
-            config = {"configurable": {"thread_id": thread_id}}
+            
+            # ATTACH LANGFUSE CALLBACK TO CONFIG
+            config = {
+                "configurable": {"thread_id": thread_id},
+                "callbacks": [langfuse_handler]
+            }
             
             # Include subgraphs=True here to accurately verify if the nested graph is paused
             state_snapshot = await app_compiled.aget_state(config, subgraphs=True)
@@ -188,7 +203,7 @@ async def resume_pipeline(
             new_snapshot = await app_compiled.aget_state(config, subgraphs=True)
             
             if new_snapshot.next:
-                # Use our new recursive function
+                # Use our recursive function
                 msg, combined_values = extract_deepest_state_and_interrupt(new_snapshot)
                 return {
                     "status": "paused", 
@@ -209,7 +224,12 @@ async def chat(message: str = Form(...), thread_id: str = Form(...)):
         async with app.state.pool.connection() as conn:
             checkpointer = AsyncPostgresSaver(conn)
             app_compiled = super_graph.compile(checkpointer=checkpointer)
-            config = {"configurable": {"thread_id": thread_id}}
+            
+            # ATTACH LANGFUSE CALLBACK TO CONFIG
+            config = {
+                "configurable": {"thread_id": thread_id},
+                "callbacks": [langfuse_handler]
+            }
             inputs = {"user_input": message}
             
             output = await app_compiled.ainvoke(inputs, config)

@@ -188,13 +188,14 @@ def engineer_node(state: MasterState):
         
         BULLETPROOF CODE SNIPPETS (USE EXACTLY AS WRITTEN):
         - `replace_fake_nulls`: `df[col] = df[col].replace(['?', 'N/A', 'n/a', 'NA', 'None', 'null', 'nan', 'NaN', '', ' ', '-999', '-9999', '9999', -999, -9999, 9999], np.nan)` (DO NOT use regex stripping before running this).
+        - `strip_whitespace`: `df[col] = df[col].astype(str).str.strip().replace('nan', np.nan)`
         - `standardize_categories`: `df[col] = df[col].astype(str).str.lower().str.strip().replace('nan', np.nan)` (Do NOT write your own regex filters for this).
         - `extract_numeric_regex`: `df[col] = df[col].astype(str).str.replace(r'[^0-9.-]', '', regex=True); df[col] = pd.to_numeric(df[col], errors='coerce')`
         - `parse_dates_resiliently`: `df[col] = pd.to_datetime(df[col], errors='coerce', format='mixed')`
         - `groupby imputation`: `df[col] = df[col].fillna(df.groupby(groupby_col, dropna=False)[col].transform('median'))`
         - `drop_redundant_columns`: `df = df.drop(columns=[col])`
         - `deduplicate_records`: `df = df.drop_duplicates()`
-        - `fill_missing_unknown`: `df[col] = df[col].fillna('Unknown')`
+        - `fill_missing_unknown`: `df[col] = df[col].replace(['nan', 'NaN', 'None'], np.nan).fillna('Unknown')`
         
         HUMAN OVERRIDE INSTRUCTIONS:
         {human}
