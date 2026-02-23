@@ -1,4 +1,4 @@
-# Autonomous AI Data Analyst 
+# AI Data Analyst Agent
 
 ## System Overview
 
