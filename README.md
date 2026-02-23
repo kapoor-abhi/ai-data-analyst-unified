@@ -83,8 +83,13 @@ The system is heavily optimized for speed, utilizing Groq's LPU inference engine
   <img src="screenshots/langgraph_graph.png" width="400"/>
 </p>
 
+## Langfuse Tracking
+<p align="center">
+  <img src="screenshots/langfuse.png" width="900"/>
+</p>
+
 
 ## Frontend Preview
 <p align="center">
-  <img src="screenshots/frontend.png" width="400"/>
+  <img src="screenshots/frontend.png" width="900"/>
 </p>
