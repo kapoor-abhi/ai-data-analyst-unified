@@ -15,7 +15,7 @@ import json
 import math
 from fastapi.responses import Response
 
-# Enterprise ML Imports
+
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -24,11 +24,11 @@ from langchain_community.cache import RedisCache
 from redis import Redis
 from langgraph.types import Command
 
-# Langfuse Observability Imports
+
 from langfuse import observe
 from langfuse.langchain import CallbackHandler
 
-# Import our Super-Graph
+
 from core.super_agent import build_super_graph
 
 load_dotenv()
@@ -38,10 +38,9 @@ logger = logging.getLogger(__name__)
 DB_URI = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/postgres")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
-# 1. Initialize Langfuse Observability
 langfuse_handler = CallbackHandler()
 
-# 2. CACHE FIX: Initialize Exact-Match Redis Cache (Not Semantic!)
+
 try:
     redis_client = Redis.from_url(REDIS_URL)
     set_llm_cache(RedisCache(redis_=redis_client))
@@ -52,7 +51,7 @@ except Exception as e:
 SANDBOX_DIR = "sandbox"
 os.makedirs(SANDBOX_DIR, exist_ok=True)
 
-# Simple local registry for file hashes to prevent redundant processing
+
 HASH_REGISTRY = {}
 
 def get_file_hash(filepath: str) -> str:
@@ -78,7 +77,7 @@ async def lifespan(app: FastAPI):
         app.state.pool = pool
         yield
         
-    # Flush Langfuse telemetry on shutdown to prevent dropped traces
+  
     langfuse_handler.flush()
 
 app = FastAPI(lifespan=lifespan)
@@ -101,15 +100,15 @@ def extract_deepest_state_and_interrupt(state_snapshot):
     if hasattr(state_snapshot, 'tasks') and state_snapshot.tasks:
         for task in state_snapshot.tasks:
             
-            # 1. DIVE DEEP FIRST: Always recurse into sub-graphs to get the freshest data
+
             if hasattr(task, 'state') and task.state:
                 sub_msg, sub_values = extract_deepest_state_and_interrupt(task.state)
-                # Merge states: sub-graph data (like cleaning_plan) updates the parent data
+             
                 values = {**values, **sub_values}
                 if sub_msg:
                     msg = sub_msg
             
-            # 2. CHECK INTERRUPTS: Grab the interrupt if we haven't found one deeper down
+          
             if not msg and hasattr(task, 'interrupts') and task.interrupts:
                 msg = str(task.interrupts[0].value)
                 
@@ -148,7 +147,7 @@ async def upload_file(
             checkpointer = AsyncPostgresSaver(conn)
             app_compiled = super_graph.compile(checkpointer=checkpointer)
             
-            # ATTACH LANGFUSE CALLBACK TO CONFIG
+            
             config = {
                 "configurable": {"thread_id": thread_id},
                 "callbacks": [langfuse_handler]
@@ -157,11 +156,11 @@ async def upload_file(
             
             output = await app_compiled.ainvoke(inputs, config)
             
-            # Fetch the state snapshot and explicitly ask LangGraph to include sub-graphs
+   
             state_snapshot = await app_compiled.aget_state(config, subgraphs=True)
             
             if state_snapshot.next:
-                # Use our recursive function to pull the nested state and interrupt
+                
                 msg, combined_values = extract_deepest_state_and_interrupt(state_snapshot)
                 return {
                     "status": "paused", 
@@ -186,24 +185,24 @@ async def resume_pipeline(
             checkpointer = AsyncPostgresSaver(conn)
             app_compiled = super_graph.compile(checkpointer=checkpointer)
             
-            # ATTACH LANGFUSE CALLBACK TO CONFIG
+  
             config = {
                 "configurable": {"thread_id": thread_id},
                 "callbacks": [langfuse_handler]
             }
             
-            # Include subgraphs=True here to accurately verify if the nested graph is paused
+
             state_snapshot = await app_compiled.aget_state(config, subgraphs=True)
             if not state_snapshot.next:
                 raise HTTPException(status_code=400, detail="Graph is not currently paused.")
                 
             output = await app_compiled.ainvoke(Command(resume=user_feedback), config)
             
-            # Include subgraphs=True here to fetch the newly paused state
+   
             new_snapshot = await app_compiled.aget_state(config, subgraphs=True)
             
             if new_snapshot.next:
-                # Use our recursive function
+
                 msg, combined_values = extract_deepest_state_and_interrupt(new_snapshot)
                 return {
                     "status": "paused", 
@@ -225,13 +224,12 @@ async def chat(message: str = Form(...), thread_id: str = Form(...)):
             checkpointer = AsyncPostgresSaver(conn)
             app_compiled = super_graph.compile(checkpointer=checkpointer)
             
-            # ATTACH LANGFUSE CALLBACK TO CONFIG
             config = {
                 "configurable": {"thread_id": thread_id},
                 "callbacks": [langfuse_handler]
             }
             
-            # ✅ THE MEMORY FIX: Append to LangGraph's message history AND pass user_input
+            
             inputs = {
                 "messages": [("user", message)], 
                 "user_input": message
@@ -284,7 +282,7 @@ async def get_data_statistics(filename: str = None):
     if not pkl_files:
         return JSONResponse(status_code=404, content={"error": "No data found in sandbox."})
         
-    # CRITICAL: If the merging agent has unified the data, prioritize that single file!
+  
     if "merged_dataset.pkl" in pkl_files:
         pkl_files = ["merged_dataset.pkl"]
 
@@ -304,10 +302,10 @@ async def get_data_statistics(filename: str = None):
             stats_df = df.describe(include='all')
             stats_dict = stats_df.to_dict()
             
-            # 1. Prefix columns with filename if there are multiple files
+            
             is_multi_file = len(pkl_files) > 1
             
-            # 2. Extract sample rows and append the filename to the keys
+   
             head_records = df.head(5).to_dict(orient="records")
             for record in head_records:
                 if is_multi_file:
@@ -315,7 +313,7 @@ async def get_data_statistics(filename: str = None):
                 else:
                     raw_sample_data.append(record)
 
-            # 3. Aggregate column profiling stats
+  
             for col in df.columns:
                 display_col = f"[{file}] {col}" if is_multi_file else col
                 
@@ -327,7 +325,7 @@ async def get_data_statistics(filename: str = None):
                 if col in stats_dict:
                     all_columns_info[display_col].update(stats_dict[col])
 
-        # 4. Pad the sample data with nulls so the frontend table doesn't break when columns mismatch
+
         final_sample_data = []
         if len(pkl_files) > 1 and raw_sample_data:
             all_keys = list(all_columns_info.keys())
@@ -343,7 +341,7 @@ async def get_data_statistics(filename: str = None):
             "total_rows": total_rows, 
             "total_columns": total_cols, 
             "columns": all_columns_info, 
-            "sample_data": final_sample_data[:15] # Send top 15 rows total
+            "sample_data": final_sample_data[:15] 
         }
 
         def clean_value(obj):
@@ -372,11 +370,11 @@ async def generate_eda_report():
     file_path = os.path.join(SANDBOX_DIR, filename)
     report_path = os.path.join(SANDBOX_DIR, "eda_report.html")
     
-    # If a previous report already exists, serve it instantly
+
     if os.path.exists(report_path):
         return FileResponse(report_path, media_type="text/html")
         
-    # If no merged dataset exists yet, fallback to looking for any .pkl
+   
     if not os.path.exists(file_path):
         pkl_files = [f for f in os.listdir(SANDBOX_DIR) if f.endswith('.pkl')]
         if not pkl_files:
@@ -384,10 +382,10 @@ async def generate_eda_report():
         file_path = os.path.join(SANDBOX_DIR, pkl_files[0])
 
     try:
-        # Load the cleaned data
+       
         df = pd.read_pickle(file_path)
         
-        # Generate the report (minimal=True speeds it up for large datasets)
+       
         profile = ProfileReport(df, title="Deep Data Profiling Report", minimal=False, explorative=True)
         profile.to_file(report_path)
         
