@@ -19,12 +19,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 SANDBOX_DIR = "sandbox"
 
-# OPTIMIZATION: Fast model for analysis and simple reasoning
+
 fast_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
-# OPTIMIZATION: Heavy 70B model strictly for complex Python pandas code generation
+
 coder_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
 
-# SECURITY FIX: Initialize the Docker Sandbox
 repl_sandbox = DockerREPL(sandbox_dir="sandbox", image_name="python-data-sandbox:latest")
 
 def get_dataframe_schema(working_files: dict) -> str:

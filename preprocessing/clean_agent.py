@@ -15,7 +15,6 @@ from langgraph.types import interrupt
 from core.sandbox import DockerREPL
 from dotenv import load_dotenv
 
-# Added config import for the interrupt state preservation
 from langchain_core.runnables.config import var_child_runnable_config, RunnableConfig
 
 load_dotenv()
@@ -34,7 +33,7 @@ class CleaningAction(BaseModel):
 
 class CleaningPlan(BaseModel):
     actions: List[CleaningAction]
-    # NEW: Force the LLM to explicitly acknowledge and handle these enterprise rules
+
     has_dropped_redundant_columns: bool = Field(description="Must be true. You must include a drop_redundant_columns action if merge keys overlap (e.g., client_id and user_id).")
     has_deduplicated: bool = Field(description="Must be true. You must include a deduplicate_records action to remove duplicate rows.")
     has_filled_unknowns: bool = Field(description="Must be true. Categorical columns with NaNs MUST get a fill_missing_unknown action.")
@@ -148,13 +147,13 @@ def strategist_node(state: MasterState):
         plan_obj = CleaningPlan.model_validate_json(strip_markdown(response.content))
         return {"cleaning_plan": plan_obj.model_dump_json(indent=2), "error": None, "iteration_count": 0}
     except ValidationError as e:
-        # FIX: Track validation iterations to prevent infinite loops
+
         current_iter = state.get("iteration_count", 0) + 1
         return {"error": f"Pydantic Validation Error: {e.errors()}", "iteration_count": current_iter}
 
 def route_strategist(state: MasterState):
     if state.get("error") and "Pydantic" in state.get("error", ""): 
-        # FIX: Break out of infinite JSON validation loops and ask the human
+
         if state.get("iteration_count", 0) >= 3:
             return "human_review"
         return "strategist"
@@ -231,15 +230,15 @@ def execute_clean_node(state: MasterState):
     return {"error": None}
 
 def verify_cleaning_node(state: MasterState):
-    # FIX: Return empty dict instead of state. Returning the full state causes the `add_messages` reducer to duplicate the entire chat history.
+
     if state.get("error"): return {} 
     
     working_files = state.get('working_files', {})
     
-    # FIX: Null safety fallback for json.loads to prevent TypeError crashes
+
     original_profile = json.loads(state.get('deep_profile_report') or '{}')
     
-    # FIX: Null safety fallback to prevent "in None" TypeError
+   
     plan_str = state.get('cleaning_plan') or ''
     is_dedup_intended = "deduplicate_records" in plan_str
     
@@ -279,7 +278,7 @@ def route_clean_retry(state: MasterState):
     return "post_clean_review"
 
 def route_post_clean(state: MasterState):
-    # Null safety check added here as well
+  
     feedback = str(state.get("user_feedback") or "").strip().lower()
     if feedback in ['approve', 'yes', 'ok', 'done', 'finish', '']:
         return END
